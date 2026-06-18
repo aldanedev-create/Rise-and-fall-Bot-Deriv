@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Deriv Rise/Fall Signal Bot</title>
+    <link rel="icon" href="data:,">
+    <script>
+        (() => {
+            const savedTheme = localStorage.getItem("deriv-dashboard-theme");
+            const systemTheme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+            document.documentElement.dataset.theme = savedTheme || systemTheme;
+        })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <script>
+        window.INITIAL_SYMBOLS = {{ symbols | tojson }};
+        window.INITIAL_SIGNALS = {{ recent_signals | tojson }};
+    </script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" defer></script>
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js" defer></script>
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}" defer></script>
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="brand-mark">D</div>
+                <div>
+                    <h1>Deriv Signal Bot</h1>
+                    <span>1H + 15M candle scanner</span>
+                </div>
+            </div>
+
+            <div class="scan-state">
+                <span class="status-dot" id="statusDot"></span>
+                <div>
+                    <strong id="statusText">Idle</strong>
+                    <span id="connectionText">Socket waiting</span>
+                </div>
+            </div>
+
+            <section class="panel controls-panel">
+                <div class="section-heading">
+                    <h2>Symbols</h2>
+                    <span id="selectedCount">0 selected</span>
+                </div>
+                <div class="symbol-list" id="symbolList">
+                    {% for item in symbols %}
+                    <label class="symbol-check">
+                        <input type="checkbox" value="{{ item.symbol }}" checked>
+                        <span>{{ item.display_name }}</span>
+                        <strong>{{ item.symbol }}</strong>
+                    </label>
+                    {% endfor %}
+                </div>
+
+                <label class="custom-symbol">
+                    <span>Custom symbol</span>
+                    <div class="custom-input-row">
+                        <input id="customSymbol" type="text" placeholder="1HZ100V" autocomplete="off">
+                        <button id="addSymbolButton" class="icon-btn" type="button" title="Add symbol">
+                            <i data-lucide="plus"></i>
+                        </button>
+                    </div>
+                </label>
+
+                <div class="action-row">
+                    <button id="startButton" class="primary-btn" type="button">
+                        <i data-lucide="play"></i>
+                        <span>Start</span>
+                    </button>
+                    <button id="stopButton" class="secondary-btn" type="button" disabled>
+                        <i data-lucide="square"></i>
+                        <span>Stop</span>
+                    </button>
+                </div>
+            </section>
+
+            <section class="panel guard-panel">
+                <div class="guard-icon">
+                    <i data-lucide="shield-check"></i>
+                </div>
+                <div>
+                    <strong>Market data only</strong>
+                    <span>No ticks. No auto trading.</span>
+                </div>
+            </section>
+        </aside>
+
+        <main class="main-content">
+            <header class="topbar">
+                <div>
+                    <p>Deriv candle strategy</p>
+                    <h2>Rise/Fall Signal Scanner</h2>
+                </div>
+                <div class="topbar-actions">
+                    <div class="theme-switch" aria-label="Theme">
+                        <button class="theme-option" type="button" data-theme-option="light" title="Light mode" aria-label="Light mode">
+                            <i data-lucide="sun"></i>
+                        </button>
+                        <button class="theme-option" type="button" data-theme-option="dark" title="Dark mode" aria-label="Dark mode">
+                            <i data-lucide="moon"></i>
+                        </button>
+                    </div>
+                    <div class="topbar-badges">
+                        <span id="transportBadge">Disconnected</span>
+                        <span>Scan-only</span>
+                    </div>
+                </div>
+            </header>
+
+            <section class="market-stage" aria-label="Signal terrain">
+                <canvas id="marketScene"></canvas>
+                <div class="stage-overlay">
+                    <div>
+                        <span class="stage-kicker">Signal Terrain</span>
+                        <h3 id="sceneHeadline">Scanner idle</h3>
+                        <p id="sceneStatus">Waiting for selected symbols</p>
+                    </div>
+                    <div class="stage-readouts">
+                        <span>
+                            <i data-lucide="activity"></i>
+                            <strong id="sceneCandles">0</strong>
+                            Candles
+                        </span>
+                        <span>
+                            <i data-lucide="zap"></i>
+                            <strong id="sceneSignals">0</strong>
+                            Signals
+                        </span>
+                    </div>
+                </div>
+            </section>
+
+            <section class="metric-grid">
+                <div class="metric-card">
+                    <span>Candles</span>
+                    <strong id="candlesMetric">0</strong>
+                </div>
+                <div class="metric-card">
+                    <span>Signals</span>
+                    <strong id="signalsMetric">0</strong>
+                </div>
+                <div class="metric-card">
+                    <span>Watching</span>
+                    <strong id="symbolsMetric">0</strong>
+                </div>
+                <div class="metric-card">
+                    <span>Gmail</span>
+                    <strong id="gmailMetric">Off</strong>
+                </div>
+                <div class="metric-card">
+                    <span>Uptime</span>
+                    <strong id="uptimeMetric">00:00</strong>
+                </div>
+            </section>
+
+            <section class="market-grid">
+                <div class="panel live-panel">
+                    <div class="panel-header">
+                        <div>
+                            <h3>Live Candles</h3>
+                            <span id="lastCandleAt">No candles yet</span>
+                        </div>
+                        <button id="refreshSignalsButton" class="icon-btn ghost" type="button" title="Refresh signal history">
+                            <i data-lucide="refresh-cw"></i>
+                        </button>
+                    </div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Symbol</th>
+                                    <th>15M Close</th>
+                                    <th>Candle Time</th>
+                                    <th>1H Trend</th>
+                                    <th>15M Market</th>
+                                    <th>Setup</th>
+                                </tr>
+                            </thead>
+                            <tbody id="candlesBody">
+                                <tr class="empty-row">
+                                    <td colspan="6">Waiting for candle data</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="panel chart-panel">
+                    <div class="panel-header">
+                        <div>
+                            <h3>15M Close Trace</h3>
+                            <span id="chartLabel">Recent normalized candle closes</span>
+                        </div>
+                    </div>
+                    <canvas id="priceChart" aria-label="Recent normalized 15 minute candle closes"></canvas>
+                </div>
+            </section>
+
+            <section class="panel signals-panel">
+                <div class="panel-header">
+                    <div>
+                        <h3>Signal History</h3>
+                        <span id="signalCountLabel">No signals stored</span>
+                    </div>
+                </div>
+                <div class="table-wrap signals-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Symbol</th>
+                                <th>Direction</th>
+                                <th>Duration</th>
+                                <th>Confidence</th>
+                                <th>Price</th>
+                                <th>Setup</th>
+                            </tr>
+                        </thead>
+                        <tbody id="signalsBody">
+                            <tr class="empty-row">
+                                <td colspan="7">No signals generated yet</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+</body>
+</html>
